@@ -1,39 +1,102 @@
 import streamlit as st
 import json
-from pathlib import Path
+import io
+import re
+
+# Document reading libraries
+try:
+    from docx import Document
+except ImportError:
+    st.error("python-docx is not installed. Add it to requirements.txt")
+try:
+    from PyPDF2 import PdfReader
+except ImportError:
+    st.error("PyPDF2 is not installed. Add it to requirements.txt")
+
+# ------------------------------
+# File text extraction helpers
+# ------------------------------
+def read_text_file(uploaded_file):
+    """Read a plain text file (.txt, .json, etc.)"""
+    return uploaded_file.getvalue().decode("utf-8")
+
+def read_docx_file(uploaded_file):
+    """Extract all text from a Word document."""
+    doc = Document(uploaded_file)
+    return "\n".join([para.text for para in doc.paragraphs])
+
+def read_pdf_file(uploaded_file):
+    """Extract text from a PDF file."""
+    pdf_reader = PdfReader(uploaded_file)
+    text = ""
+    for page in pdf_reader.pages:
+        page_text = page.extract_text()
+        if page_text:
+            text += page_text + "\n"
+    return text.strip()
 
 # ------------------------------
 # Streamlit UI
 # ------------------------------
 st.set_page_config(page_title="EV Report Generator", layout="wide")
 st.title("⚡ EV Market Outlook HTML Generator")
-st.markdown("Upload your `report_data.json` or paste its content to generate a styled HTML report.")
+st.markdown(
+    "Upload a **JSON, text, Word, or PDF** file containing your report configuration, "
+    "or paste the JSON/text directly below."
+)
 
-uploaded_file = st.file_uploader("Upload JSON file", type=["json"])
-json_text = st.text_area("Or paste JSON content", height=200)
+uploaded_file = st.file_uploader(
+    "Upload file (JSON, TXT, DOCX, PDF)",
+    type=["json", "txt", "docx", "pdf"]
+)
 
-json_data = None
+json_text = st.text_area(
+    "Or paste JSON / text content here (overrides file upload if both provided)",
+    height=200
+)
 
+# Placeholder for the final JSON data
+report_data = None
+
+# Process uploaded file first
 if uploaded_file is not None:
+    file_type = uploaded_file.name.split(".")[-1].lower()
     try:
-        json_data = json.load(uploaded_file)
-        st.success("JSON file loaded!")
-    except Exception as e:
-        st.error(f"Error reading JSON file: {e}")
+        if file_type in ("json", "txt"):
+            raw_text = read_text_file(uploaded_file)
+        elif file_type == "docx":
+            raw_text = read_docx_file(uploaded_file)
+        elif file_type == "pdf":
+            raw_text = read_pdf_file(uploaded_file)
+        else:
+            st.error("Unsupported file format.")
+            raw_text = None
 
+        if raw_text:
+            # Try to parse as JSON
+            try:
+                report_data = json.loads(raw_text)
+                st.success("✅ File loaded and parsed as JSON!")
+            except json.JSONDecodeError:
+                st.error("❌ File does not contain valid JSON. Please check the content.")
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+
+# If the user also pasted text, it takes priority (overrides file)
 if json_text.strip():
     try:
-        json_data = json.loads(json_text)
-        st.success("JSON text parsed!")
-    except Exception as e:
-        st.error(f"Error parsing JSON text: {e}")
+        report_data = json.loads(json_text)
+        st.success("✅ Pasted text parsed as JSON!")
+    except json.JSONDecodeError:
+        st.error("❌ Pasted text is not valid JSON.")
 
-if st.button("✨ Generate HTML Report") and json_data is not None:
+# Generate button
+if st.button("✨ Generate HTML Report") and report_data is not None:
     with st.spinner("Generating report..."):
-        html_output = build_html_report_from_dict(json_data)
+        html_output = build_html_report_from_dict(report_data)
     st.success("Report generated!")
-    if "meta" in json_data:
-        st.markdown(f"**Title:** {json_data['meta'].get('title', '')}")
+    if "meta" in report_data:
+        st.markdown(f"**Title:** {report_data['meta'].get('title', '')}")
     st.download_button(
         label="📥 Download HTML Report",
         data=html_output,
@@ -42,9 +105,12 @@ if st.button("✨ Generate HTML Report") and json_data is not None:
     )
     with st.expander("Preview HTML"):
         st.components.v1.html(html_output, height=600, scrolling=True)
+else:
+    if report_data is None:
+        st.info("Please upload a file or paste valid JSON content.")
 
 # ------------------------------
-# HTML Generator Function (fully self-contained)
+# HTML Generator (same as before)
 # ------------------------------
 def build_html_report_from_dict(data):
     meta = data["meta"]
@@ -193,5 +259,4 @@ def build_html_report_from_dict(data):
 </main>
 </body>
 </html>"""
-
     return html

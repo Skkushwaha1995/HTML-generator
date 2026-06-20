@@ -1,6 +1,7 @@
 import streamlit as st
 import json
 import re
+from datetime import datetime
 
 # ---- Optional document imports ----
 try:
@@ -12,28 +13,31 @@ try:
 except ImportError:
     PdfReader = None
 
-# ===================== TEMPLATES =====================
-TEMPLATES = {
-    "EV Market Report": {
-        "colors": {"hero": "linear-gradient(135deg,#0f172a 0%,#1e3a5f 40%,#0ea5e9 100%)",
-                   "accent": "indigo"},
-        "layout": "ev_report"
-    },
-    "Modern Blog Post": {
-        "colors": {"hero": "linear-gradient(135deg,#1e293b 0%,#334155 100%)",
-                   "accent": "emerald"},
-        "layout": "blog"
-    },
-    "Product Review": {
-        "colors": {"hero": "linear-gradient(135deg,#7c3aed 0%,#a855f7 100%)",
-                   "accent": "purple"},
-        "layout": "product_review"
-    },
-    "Minimal Newsletter": {
-        "colors": {"hero": "#f8fafc", "text": "#0f172a", "accent": "rose"},
-        "layout": "newsletter"
-    }
+# ===================== STYLE DEFINITIONS =====================
+CARD_STYLES = {
+    "Elevated Shadow": "bg-white rounded-2xl shadow-lg p-6 hover:shadow-xl transition-shadow",
+    "Bordered Accent": "bg-white rounded-xl border-l-4 border-{color}-500 p-6 shadow-sm",
+    "Flat Minimal": "bg-gray-50 rounded-lg p-6 border border-gray-200",
+    "Dark Card": "bg-gray-800 text-white rounded-2xl p-6 shadow-md"
 }
+
+TABLE_STYLES = {
+    "Striped Rows": "striped",
+    "Dark Header": "dark-header",
+    "Bordered": "bordered",
+    "Minimal": "minimal"
+}
+
+COLOR_THEMES = {
+    "Blue (Default)": "indigo",
+    "Green": "emerald",
+    "Purple": "violet",
+    "Rose": "rose",
+    "Amber": "amber",
+    "Slate": "slate"
+}
+
+FONTS = ["Inter", "System UI", "Serif"]
 
 # ===================== UTILS =====================
 def read_text_file(uploaded_file):
@@ -56,214 +60,221 @@ def read_pdf_file(uploaded_file):
             text += t + "\n"
     return text.strip()
 
-# ===================== ADVANCED PLAIN‑TEXT PARSER =====================
-def parse_rich_text(raw_text):
-    """Convert text with Markdown‑like hints into styled HTML blocks.
-    Features:
-      - Headings: # Title, ## Section
-      - Bold: **text**
-      - Lists: - or * (bullets), 1. (numbered)
-      - Tables: | col1 | col2 | or CSV lines (3+ commas)
-      - Card grids: heading like ## Cards: ... followed by **Title** + bullets
-      - Blockquotes: > quote
-      - Links: [text](url)
+def get_color(color_name):
+    return COLOR_THEMES.get(color_name, "indigo")
+
+def build_card_html(cards_list, card_style, color_theme):
+    """Builds a grid of cards from a list of dicts {title, items, image}."""
+    color = get_color(color_theme)
+    style_template = CARD_STYLES[card_style]
+    if "{color}" in style_template:
+        style_class = style_template.replace("{color}", color)
+    else:
+        style_class = style_template
+
+    cards_html = []
+    for card in cards_list:
+        items = "".join([f"<li class='text-sm'>{item}</li>" for item in card.get("items", [])])
+        image_tag = ""
+        if card.get("image"):
+            image_tag = f'<img src="{card["image"]}" class="w-full h-32 object-cover rounded-lg mb-3" />'
+        cards_html.append(f"""
+        <div class="{style_class} flex flex-col">
+            {image_tag}
+            <h4 class="font-bold text-lg mb-2">{card['title']}</h4>
+            <ul class="list-disc list-inside space-y-1">{items}</ul>
+        </div>
+        """)
+    return f'<div class="grid md:grid-cols-2 gap-6 my-6">{"".join(cards_html)}</div>'
+
+def build_table_html(rows, table_style, color_theme):
+    """rows: list of lists, first row is header."""
+    color = get_color(color_theme)
+    header_html = "".join([f"<th class='px-4 py-3'>{cell}</th>" for cell in rows[0]])
+    body_rows = ""
+    for i, row in enumerate(rows[1:]):
+        row_class = ""
+        if table_style == "Striped Rows" and i % 2 == 1:
+            row_class = "bg-gray-50"
+        cells = "".join([f"<td class='px-4 py-3 border-b'>{cell}</td>" for cell in row])
+        body_rows += f"<tr class='{row_class}'>{cells}</tr>"
+
+    # Header styling
+    if table_style == "Dark Header":
+        thead_style = f"bg-{color}-600 text-white"
+    elif table_style == "Bordered":
+        thead_style = f"bg-{color}-100 border-b-2 border-{color}-500"
+    else:  # minimal / striped
+        thead_style = f"bg-{color}-50 text-{color}-800"
+
+    table_html = f"""<div class="overflow-x-auto my-6 rounded-xl shadow">
+    <table class="w-full bg-white">
+        <thead><tr class="{thead_style}">{header_html}</tr></thead>
+        <tbody>{body_rows}</tbody>
+    </table>
+</div>"""
+    return table_html
+
+def parse_advanced_plain_text(raw_text, card_style, table_style, color_theme):
+    """
+    Parses plain text with markers:
+      ## Cards: title
+      **Card Title** + - items
+      | table |
+      # heading, > quote, etc.
     """
     lines = raw_text.splitlines()
     output = []
     i = 0
-    in_list = None   # 'ul' or 'ol'
-    in_card_grid = False
-    card_buffer = []
-    card_title = None
-    card_items = []
+    in_card_section = False
+    card_buffer = []  # list of dicts
+    current_card = None
+    color = get_color(color_theme)
 
-    def close_list():
-        nonlocal in_list
-        if in_list:
-            output.append(f"</{in_list}>")
-            in_list = None
-
-    def flush_card():
-        nonlocal card_title, card_items
-        if card_title:
-            items_html = "".join([f"<li>{simple_bold(item)}</li>" for item in card_items])
-            card_buffer.append(f"""<div class="bg-white rounded-xl shadow p-5 flex-1">
-                <h4 class="text-lg font-bold mb-2">{card_title}</h4>
-                <ul class="list-disc list-inside text-gray-700 space-y-1">{items_html}</ul>
-            </div>""")
-            card_title = None
-            card_items = []
-
-    def close_card_grid():
-        nonlocal in_card_grid, card_buffer
-        if in_card_grid:
-            flush_card()
-            if card_buffer:
-                output.append('<div class="grid md:grid-cols-2 gap-4 my-6">')
-                output.extend(card_buffer)
-                output.append("</div>")
-                card_buffer = []
-            in_card_grid = False
+    def flush_cards():
+        nonlocal card_buffer
+        if card_buffer:
+            output.append(build_card_html(card_buffer, card_style, color_theme))
+            card_buffer = []
 
     while i < len(lines):
         line = lines[i].strip()
-
-        # Blank line
         if not line:
-            close_list()
-            close_card_grid()
+            flush_cards()
+            in_card_section = False
             output.append("<br>")
             i += 1
             continue
 
         # Headings
-        if line.startswith("## "):
-            close_list()
-            close_card_grid()
-            title_text = line[3:]
-            if title_text.lower().startswith("cards:"):
-                in_card_grid = True
-                output.append(f"<h3 class='text-2xl font-bold mt-8 mb-4 text-gray-900'>{title_text[6:].strip()}</h3>")
-            else:
-                output.append(f"<h2 class='text-2xl font-bold mt-8 mb-3 text-gray-900'>{title_text}</h2>")
+        if line.startswith("# "):
+            flush_cards()
+            output.append(f'<h1 class="text-3xl font-extrabold mt-8 mb-4 text-gray-900">{line[2:]}</h1>')
             i += 1
             continue
-        if line.startswith("# "):
-            close_list()
-            close_card_grid()
-            output.append(f"<h1 class='text-3xl font-extrabold mt-8 mb-4 text-gray-900'>{line[2:]}</h1>")
+        if line.startswith("## "):
+            flush_cards()
+            title = line[3:]
+            if title.lower().startswith("cards:"):
+                in_card_section = True
+                output.append(f'<h3 class="text-2xl font-bold mt-8 mb-4 text-{color}-600">{title[6:].strip()}</h3>')
+            else:
+                output.append(f'<h2 class="text-2xl font-bold mt-8 mb-3 text-gray-900">{title}</h2>')
             i += 1
             continue
         if line.startswith("### "):
-            close_list()
-            close_card_grid()
-            output.append(f"<h3 class='text-xl font-semibold mt-6 mb-2 text-gray-800'>{line[4:]}</h3>")
+            flush_cards()
+            output.append(f'<h3 class="text-xl font-semibold mt-6 mb-2 text-gray-800">{line[4:]}</h3>')
             i += 1
+            continue
+
+        # Card section logic
+        if in_card_section and line.startswith("**") and line.endswith("**"):
+            if current_card:
+                card_buffer.append(current_card)
+            current_card = {"title": line[2:-2], "items": []}
+            i += 1
+            continue
+        if in_card_section and (line.startswith("- ") or line.startswith("* ")):
+            if current_card is not None:
+                current_card["items"].append(line[2:])
+            i += 1
+            continue
+        # If we are in card section but line doesn't match card syntax, close
+        if in_card_section and current_card:
+            card_buffer.append(current_card)
+            current_card = None
+            in_card_section = False  # exit card mode
+
+        # Table detection (pipe)
+        if "|" in line and line.count("|") >= 2:
+            flush_cards()
+            table_rows = [line]
+            i += 1
+            while i < len(lines) and "|" in lines[i] and lines[i].strip().count("|") >= 2:
+                table_rows.append(lines[i].strip())
+                i += 1
+            # parse
+            parsed_rows = []
+            for r in table_rows:
+                cells = [c.strip() for c in r.split("|") if c.strip()]
+                parsed_rows.append(cells)
+            output.append(build_table_html(parsed_rows, table_style, color_theme))
+            continue
+
+        # CSV table (comma separated)
+        if line.count(",") >= 2 and i+1 < len(lines) and lines[i+1].strip().count(",") >= 2:
+            flush_cards()
+            table_rows = [line]
+            i += 1
+            while i < len(lines) and lines[i].strip().count(",") >= 2:
+                table_rows.append(lines[i].strip())
+                i += 1
+            parsed_rows = [r.split(",") for r in table_rows]
+            output.append(build_table_html(parsed_rows, table_style, color_theme))
             continue
 
         # Blockquote
         if line.startswith("> "):
-            close_list()
-            close_card_grid()
-            output.append(f"<blockquote class='border-l-4 border-gray-300 pl-4 italic text-gray-600 my-4'>{line[2:]}</blockquote>")
+            flush_cards()
+            output.append(f'<blockquote class="border-l-4 border-{color}-300 pl-4 italic text-gray-600 my-4">{line[2:]}</blockquote>')
             i += 1
             continue
 
-        # Table detection: pipe or CSV
-        if "|" in line and line.count("|") >= 2:
-            close_list()
-            close_card_grid()
-            table_rows = []
-            while i < len(lines) and lines[i].strip().startswith("|"):
-                table_rows.append(lines[i].strip())
-                i += 1
-            output.append(build_table_from_pipes(table_rows))
-            continue
-        if line.count(",") >= 2:
-            # possible CSV table – check next line
-            if i+1 < len(lines) and lines[i+1].strip().count(",") >= 2:
-                close_list()
-                close_card_grid()
-                table_rows = [line]
-                i += 1
-                while i < len(lines) and lines[i].strip().count(",") >= 2:
-                    table_rows.append(lines[i].strip())
-                    i += 1
-                output.append(build_table_from_csv(table_rows))
-                continue
-
-        # Card grid items inside a Cards section
-        if in_card_grid and line.startswith("**") and line.endswith("**"):
-            flush_card()
-            card_title = line[2:-2]
-            i += 1
-            continue
-        if in_card_grid and (line.startswith("- ") or line.startswith("* ")):
-            card_items.append(line[2:])
-            i += 1
-            continue
-        # If inside card grid but not a card item, close grid
-        if in_card_grid:
-            close_card_grid()
-
-        # Bullet lists
+        # Bullet list
         if re.match(r"^[-*]\s", line):
-            if in_list != "ul":
-                close_list()
-                output.append("<ul class='list-disc list-inside ml-4 space-y-1 mb-4'>")
-                in_list = "ul"
-            output.append(f"<li>{simple_bold(line[2:])}</li>")
+            flush_cards()
+            output.append(f'<ul class="list-disc list-inside ml-4 space-y-1 mb-4"><li>{line[2:]}</li></ul>')
             i += 1
             continue
 
         # Numbered list
         if re.match(r"^\d+\.\s", line):
-            if in_list != "ol":
-                close_list()
-                output.append("<ol class='list-decimal list-inside ml-4 space-y-1 mb-4'>")
-                in_list = "ol"
+            flush_cards()
             content = re.sub(r"^\d+\.\s", "", line)
-            output.append(f"<li>{simple_bold(content)}</li>")
+            output.append(f'<ol class="list-decimal list-inside ml-4 space-y-1 mb-4"><li>{content}</li></ol>')
             i += 1
             continue
 
-        # If we were in a list and now aren't, close it
-        close_list()
-        close_card_grid()
-
         # Normal paragraph
-        output.append(f"<p class='mb-4 text-gray-700 leading-relaxed'>{simple_bold(line)}</p>")
+        flush_cards()
+        output.append(f'<p class="mb-4 text-gray-700 leading-relaxed">{line}</p>')
         i += 1
 
-    close_list()
-    close_card_grid()
+    # flush remaining
+    if current_card:
+        card_buffer.append(current_card)
+    flush_cards()
     return "\n".join(output)
 
-def simple_bold(text):
-    return re.sub(r"\*\*(.*?)\*\*", r"<strong class='font-semibold text-gray-900'>\1</strong>", text)
+# ===================== FINAL HTML GENERATION =====================
+def generate_html(content, is_json, meta, style_settings):
+    card_style = style_settings["card_style"]
+    table_style = style_settings["table_style"]
+    color_theme = style_settings["color_theme"]
+    font = style_settings["font"]
 
-def build_table_from_pipes(rows):
-    if len(rows) < 2:
-        return ""
-    # header
-    header_cells = [cell.strip() for cell in rows[0].split("|") if cell.strip()]
-    thead = "<tr>" + "".join([f"<th class='px-4 py-3 bg-indigo-500 text-white font-semibold text-sm'>{h}</th>" for h in header_cells]) + "</tr>"
-    tbody = ""
-    for row in rows[1:]:
-        cells = [cell.strip() for cell in row.split("|") if cell.strip()]
-        tbody += "<tr>" + "".join([f"<td class='px-4 py-3 border-b border-gray-200'>{c}</td>" for c in cells]) + "</tr>"
-    return f"""<div class="overflow-x-auto my-6 rounded-xl shadow">
-    <table class="w-full bg-white">
-        <thead>{thead}</thead>
-        <tbody>{tbody}</tbody>
-    </table>
-</div>"""
+    color = get_color(color_theme)
+    hero_bg = f"linear-gradient(135deg, #1e293b, #{color})"  # simple gradient
+    if color_theme == "Slate":
+        hero_bg = "#f8fafc"
+    font_family = {
+        "Inter": "'Inter', sans-serif",
+        "System UI": "system-ui, -apple-system, sans-serif",
+        "Serif": "'Georgia', serif"
+    }[font]
 
-def build_table_from_csv(rows):
-    # first row is header
-    header = [h.strip() for h in rows[0].split(",")]
-    thead = "<tr>" + "".join([f"<th class='px-4 py-3 bg-indigo-500 text-white font-semibold text-sm'>{h}</th>" for h in header]) + "</tr>"
-    tbody = ""
-    for row in rows[1:]:
-        cells = [c.strip() for c in row.split(",")]
-        tbody += "<tr>" + "".join([f"<td class='px-4 py-3 border-b border-gray-200'>{c}</td>" for c in cells]) + "</tr>"
-    return f"""<div class="overflow-x-auto my-6 rounded-xl shadow">
-    <table class="w-full bg-white">
-        <thead>{thead}</thead>
-        <tbody>{tbody}</tbody>
-    </table>
-</div>"""
+    title = meta.get("title", "Report")
+    subtitle = meta.get("subtitle", "")
+    badge = meta.get("badge", "Report")
 
-# ===================== HTML BUILDERS =====================
-def build_plain_html(raw_text, template_name, meta=None):
-    tpl = TEMPLATES[template_name]
-    hero_bg = tpl["colors"]["hero"]
-    title = meta.get("title", "Report") if meta else "Report"
-    subtitle = meta.get("subtitle", "") if meta else ""
-    badge = meta.get("badge", "Report") if meta else "Report"
-    hero_text_color = "text-gray-900" if template_name == "Minimal Newsletter" else "text-white"
+    hero_text = "text-white" if color_theme != "Slate" else "text-gray-900"
 
-    body_content = parse_rich_text(raw_text)
+    if is_json:
+        # Use JSON structure to build content (we'll reuse the previous ev_report builder if needed)
+        body = "<p class='text-gray-500'>JSON structured mode – insert your structured report builder here.</p>"
+    else:
+        body = parse_advanced_plain_text(content, card_style, table_style, color_theme)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -273,93 +284,78 @@ def build_plain_html(raw_text, template_name, meta=None):
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <style>
-        body {{ margin:0; padding:0; font-family:'Inter',sans-serif; background:#f8fafc; }}
-        .hero-gradient {{ background:{hero_bg}; }}
+        body {{ font-family: {font_family}; background: #f8fafc; margin:0; }}
+        .hero {{ background: {hero_bg}; }}
     </style>
 </head>
 <body>
-<header class="hero-gradient {hero_text_color} relative overflow-hidden">
-    <div class="max-w-[900px] mx-auto px-4 md:px-8 py-12 md:py-20 relative z-10 text-center">
+<header class="hero {hero_text} py-16 md:py-24 text-center">
+    <div class="max-w-3xl mx-auto px-4">
         <span class="inline-block bg-white/20 px-4 py-1 rounded-full text-sm mb-4">{badge}</span>
-        <h1 class="text-4xl md:text-5xl font-extrabold mb-3">{title}</h1>
-        <p class="text-xl opacity-80">{subtitle}</p>
+        <h1 class="text-4xl md:text-5xl font-extrabold">{title}</h1>
+        <p class="mt-4 text-xl opacity-80">{subtitle}</p>
     </div>
 </header>
-<main class="max-w-[900px] mx-auto px-4 md:px-8 py-8">
-    <div class="bg-white p-6 md:p-10 rounded-2xl shadow-lg">
-        {body_content}
+<main class="max-w-4xl mx-auto px-4 py-8">
+    <div class="bg-white rounded-2xl shadow-lg p-6 md:p-10">
+        {body}
     </div>
-    <footer class="text-center text-sm text-gray-400 mt-10">© 2026 – Generated with EV Report Generator</footer>
+    <footer class="text-center text-sm text-gray-400 mt-10">© 2026 – Generated Report</footer>
 </main>
 </body>
 </html>"""
     return html
 
-def build_structured_html(data, template_name):
-    tpl = TEMPLATES[template_name]
-    if tpl["layout"] == "ev_report":
-        return build_ev_report(data)
-    else:
-        meta = data.get("meta", {})
-        sections = data.get("sections", {})
-        hero_bg = tpl["colors"]["hero"]
-        hero_text = "text-white"
-        if template_name == "Minimal Newsletter":
-            hero_text = "text-gray-900"
-        body_html = ""
-        for key, sec in sections.items():
-            if isinstance(sec, dict):
-                body_html += f"<h3 class='text-xl font-bold mt-8 mb-3'>{sec.get('heading','')}</h3>"
-                body_html += f"<div class='text-gray-700'>{sec.get('body','')}</div>"
-            else:
-                body_html += f"<p>{sec}</p>"
-        html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <style>body{{font-family:'Inter',sans-serif;background:#f8fafc;}}.hero-gradient{{background:{hero_bg};}}</style>
-</head>
-<body>
-<header class="hero-gradient {hero_text} py-20 text-center">
-    <div class="max-w-3xl mx-auto">
-        <h1 class="text-4xl font-extrabold">{meta.get('title','Report')}</h1>
-        <p class="mt-4 text-xl opacity-80">{meta.get('subtitle','')}</p>
-    </div>
-</header>
-<main class="max-w-3xl mx-auto px-4 py-8">
-    <div class="bg-white rounded-2xl shadow p-6">{body_html}</div>
-</main>
-</body>
-</html>"""
-        return html
-
-def build_ev_report(data):
-    # Same EV report builder from previous answer (full code omitted for brevity;
-    # you must include the original build_html_report_from_dict function here)
-    # For simplicity, I'll return a placeholder that points to the original function.
-    return "<html><body><h1>EV Report placeholder – copy original build_html_report_from_dict here</h1></body></html>"
-
 # ===================== STREAMLIT UI =====================
-st.set_page_config(page_title="HTML Report Generator", layout="wide")
-st.title("📄 Multi‑Template HTML Report Generator")
-st.markdown("Upload a file or paste content. The generator now creates **tables, cards, and rich formatting** from plain text.")
+st.set_page_config(page_title="Report Generator", layout="wide")
+st.title("📄 HTML Report Generator – Custom Styles")
 
+# ---------- Sidebar Options ----------
+with st.sidebar:
+    st.header("🎨 Style Settings")
+    card_style = st.selectbox("Card Style", list(CARD_STYLES.keys()))
+    table_style = st.selectbox("Table Style", list(TABLE_STYLES.keys()))
+    color_theme = st.selectbox("Colour Theme", list(COLOR_THEMES.keys()) + ["Dark Mode"])
+    font = st.selectbox("Font", FONTS)
+
+    st.markdown("---")
+    st.markdown("✏️ Use `## Cards:` and `**Title**` to create card grids.")
+    st.markdown("✏️ Use `| col1 | col2 |` for tables.")
+
+# ---------- Main Content ----------
 col1, col2 = st.columns([2, 1])
 with col1:
     uploaded_file = st.file_uploader("Upload file", type=["json","txt","docx","pdf"])
 with col2:
-    template_name = st.selectbox("Choose template", list(TEMPLATES.keys()))
+    input_mode = st.radio("Input type", ["Plain Text (markers)", "JSON"])
 
-json_text = st.text_area("Or paste content here (JSON or plain text)", height=250)
+meta_title = st.text_input("Report Title", "EV Market Outlook")
+meta_subtitle = st.text_input("Subtitle", "Your Electric Vehicle Report")
 
-raw_text = None
-report_data = None
-is_json = False
+if input_mode == "Plain Text (markers)":
+    raw_text = st.text_area("Paste your text with markers", height=300, value="""
+# Budget-Friendly EVs
+## Cards: Affordable City Cars
+**VinFast VF 3**
+- Price: ₹7.5 – ₹10 Lakh
+- Range: 215 km
 
-# Process file
+**MG Bingo EV**
+- Price: ₹9 – ₹12 Lakh
+- Range: Up to 410 km
+
+## Quick Comparison
+| Model | Price | Range |
+|-------|-------|-------|
+| Maruti e Vitara | ₹16–20 Lakh | 543 km |
+| Toyota Ebella | ₹23–28 Lakh | 543 km |
+
+> 2026 promises major advances in battery tech.
+""")
+else:
+    raw_text = st.text_area("Paste JSON configuration", height=300, value='{"meta":{"title":"EV Report"},"sections":{}}')
+
+# File override
 if uploaded_file is not None:
     file_type = uploaded_file.name.split(".")[-1].lower()
     try:
@@ -372,30 +368,29 @@ if uploaded_file is not None:
     except Exception as e:
         st.error(f"File error: {e}")
 
-if json_text.strip():
-    raw_text = json_text.strip()
-
-if raw_text:
+is_json = False
+if input_mode == "JSON":
     try:
-        report_data = json.loads(raw_text)
+        json.loads(raw_text)
         is_json = True
-        st.success("✅ Valid JSON – structured report mode")
-    except json.JSONDecodeError:
+    except:
+        st.warning("Invalid JSON – falling back to plain text.")
         is_json = False
-        st.info("ℹ️ Plain text – rich formatting enabled (tables, cards, headings)")
 
 if st.button("✨ Generate HTML Report"):
-    if not raw_text:
-        st.warning("Please provide some content.")
+    if not raw_text.strip():
+        st.warning("Please provide content.")
     else:
+        meta = {"title": meta_title, "subtitle": meta_subtitle, "badge": "Report"}
+        style_settings = {
+            "card_style": card_style,
+            "table_style": table_style,
+            "color_theme": color_theme,
+            "font": font
+        }
         with st.spinner("Generating..."):
-            if is_json and report_data is not None:
-                final_html = build_structured_html(report_data, template_name)
-            else:
-                meta = {"title": "EV Market Outlook", "subtitle": "Your Report", "badge": "Report"}
-                final_html = build_plain_html(raw_text, template_name, meta)
-
-        st.success("Report ready!")
+            final_html = generate_html(raw_text, is_json, meta, style_settings)
+        st.success("Ready!")
         st.download_button("📥 Download HTML", data=final_html, file_name="report.html", mime="text/html")
         with st.expander("👁 Preview HTML", expanded=True):
             st.components.v1.html(final_html, height=700, scrolling=True)
